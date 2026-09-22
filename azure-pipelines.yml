@@ -4,37 +4,130 @@ trigger:
 pool:
   vmImage: ubuntu-latest
 
-steps:
-  - task: AzureCLI@2
-    displayName: "Terraform Init, Plan and Apply"
-    inputs:
-      azureSubscription: "azure-aks-connection"
-      scriptType: "bash"
-      scriptLocation: "inlineScript"
-      inlineScript: |
-        cd terraform
+stages:
 
-        echo "Installing Terraform..."
-        sudo apt-get update -y
-        sudo apt-get install -y unzip
+# ==========================================
+# STAGE 1: TERRAFORM PLAN
+# ==========================================
+- stage: TerraformPlan
+  displayName: "Terraform Plan"
 
-        TERRAFORM_VERSION="1.9.8"
-        wget https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
-        unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip
-        sudo mv terraform /usr/local/bin/
+  jobs:
+  - job: Plan
+    displayName: "Terraform Init and Plan"
 
-        echo "Terraform version:"
-        terraform version
+    steps:
+    - checkout: self
 
-        echo "Terraform Init..."
-        terraform init
+    - task: AzureCLI@2
+      displayName: "Terraform Init, Validate and Plan"
+      inputs:
+        azureSubscription: "azure-aks-connection"
+        scriptType: "bash"
+        scriptLocation: "inlineScript"
+        inlineScript: |
 
-        echo "Terraform Validate..."
-        terraform validate
-                echo "Importing existing Resource Group..."
-        terraform import azurerm_resource_group.aks_rg "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/rg-aks-devops"
-        echo "Terraform Plan..."
-        terraform plan
+          echo "Installing Terraform..."
 
-        echo "Terraform Apply..."
-        terraform apply -auto-approve
+          sudo apt-get update -y
+          sudo apt-get install -y unzip wget
+
+          TERRAFORM_VERSION="1.9.8"
+
+          wget https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+
+          unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+
+          sudo mv terraform /usr/local/bin/
+
+          terraform version
+
+          echo "Terraform Init..."
+          terraform init
+
+          echo "Terraform Validate..."
+          terraform validate
+
+          echo "Checking Resource Group..."
+
+          RG_EXISTS=$(az group exists \
+            --name rg-aks-devops)
+
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "Importing existing Resource Group..."
+
+            terraform import \
+              azurerm_resource_group.aks_rg \
+              "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/rg-aks-devops" \
+              || true
+          fi
+
+          echo "Terraform Plan..."
+
+          terraform plan -out=tfplan
+
+    - task: PublishPipelineArtifact@1
+      displayName: "Publish Terraform Plan"
+      inputs:
+        targetPath: "$(System.DefaultWorkingDirectory)/tfplan"
+        artifact: "terraform-plan"
+
+
+# ==========================================
+# STAGE 2: MANUAL APPROVAL + APPLY
+# ==========================================
+- stage: TerraformApply
+  displayName: "Manual Approval and Terraform Apply"
+
+  dependsOn: TerraformPlan
+  condition: succeeded()
+
+  jobs:
+  - deployment: Apply
+    displayName: "Terraform Apply"
+
+    environment: "shreeganesh 3 ka"
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - checkout: self
+
+          - task: DownloadPipelineArtifact@2
+            displayName: "Download Terraform Plan"
+            inputs:
+              artifact: "terraform-plan"
+              path: "$(System.DefaultWorkingDirectory)"
+
+          - task: AzureCLI@2
+            displayName: "Terraform Apply"
+            inputs:
+              azureSubscription: "azure-aks-connection"
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+
+                echo "Installing Terraform..."
+
+                sudo apt-get update -y
+                sudo apt-get install -y unzip wget
+
+                TERRAFORM_VERSION="1.9.8"
+
+                wget https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+
+                unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+
+                sudo mv terraform /usr/local/bin/
+
+                terraform version
+
+                echo "Terraform Init..."
+
+                terraform init
+
+                echo "Terraform Apply..."
+
+                terraform apply -auto-approve tfplan
